@@ -16,8 +16,11 @@ from config import TEMP_DIR, DOWNLOAD_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
+# Путь к cookies файлам (положи рядом с bot.py)
+YOUTUBE_COOKIES  = "/app/cookies/youtube_cookies.txt"
+INSTAGRAM_COOKIES = "/app/cookies/instagram_cookies.txt"
 
-# ─── Supported platforms ─────────────────────────────────────────────────────
+# ─── Supported platforms ──────────────────────────────────────────────────────
 PLATFORM_PATTERNS = {
     "YouTube":   re.compile(r"(youtube\.com|youtu\.be)"),
     "TikTok":    re.compile(r"tiktok\.com"),
@@ -36,7 +39,7 @@ def detect_platform(url: str) -> Optional[str]:
 @dataclass
 class VideoInfo:
     title: str
-    duration: int          # seconds
+    duration: int
     thumbnail: Optional[str]
     platform: str
     url: str
@@ -49,9 +52,32 @@ class DownloadResult:
     is_audio: bool
 
 
+# ─── Duration formatter (fix: float duration crash) ──────────────────────────
+def _fmt_duration(seconds) -> str:
+    try:
+        seconds = int(seconds or 0)
+        if not seconds:
+            return "неизвестно"
+        m, s = divmod(seconds, 60)
+        h, m = divmod(m, 60)
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+    except Exception:
+        return "неизвестно"
+
+
+# ─── Cookies helper ───────────────────────────────────────────────────────────
+def _cookies_for(url: str) -> Optional[str]:
+    if "youtube" in url or "youtu.be" in url:
+        if os.path.exists(YOUTUBE_COOKIES):
+            return YOUTUBE_COOKIES
+    if "instagram" in url:
+        if os.path.exists(INSTAGRAM_COOKIES):
+            return INSTAGRAM_COOKIES
+    return None
+
+
 # ─── Info extraction ──────────────────────────────────────────────────────────
 async def fetch_info(url: str) -> VideoInfo:
-    """Extract metadata without downloading."""
     loop = asyncio.get_event_loop()
 
     def _extract():
@@ -60,6 +86,9 @@ async def fetch_info(url: str) -> VideoInfo:
             "skip_download": True,
             "noplaylist": True,
         }
+        cookies = _cookies_for(url)
+        if cookies:
+            opts["cookiefile"] = cookies
         with yt_dlp.YoutubeDL(opts) as ydl:
             return ydl.extract_info(url, download=False)
 
@@ -78,12 +107,9 @@ async def fetch_info(url: str) -> VideoInfo:
 
 
 # ─── Download helpers ─────────────────────────────────────────────────────────
-def _build_video_opts(quality: str, out_template: str) -> dict:
-    """
-    quality: "360", "720", "1080"
-    """
+def _build_video_opts(quality: str, out_template: str, url: str = "") -> dict:
     height = int(quality)
-    return {
+    opts = {
         "quiet": True,
         "noplaylist": True,
         "outtmpl": out_template,
@@ -94,29 +120,28 @@ def _build_video_opts(quality: str, out_template: str) -> dict:
             f"/best"
         ),
         "merge_output_format": "mp4",
-        "postprocessors": [
-            {
-                "key": "FFmpegVideoConvertor",
-                "preferedformat": "mp4",
-            }
-        ],
+        "postprocessors": [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}],
     }
+    cookies = _cookies_for(url)
+    if cookies:
+        opts["cookiefile"] = cookies
+    return opts
 
 
-def _build_audio_opts(out_template: str) -> dict:
-    return {
+def _build_audio_opts(out_template: str, url: str = "") -> dict:
+    opts = {
         "quiet": True,
         "noplaylist": True,
         "outtmpl": out_template,
         "format": "bestaudio/best",
         "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }
+            {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
         ],
     }
+    cookies = _cookies_for(url)
+    if cookies:
+        opts["cookiefile"] = cookies
+    return opts
 
 
 async def download_video(
@@ -125,26 +150,20 @@ async def download_video(
     audio_only: bool = False,
     user_id: int = 0,
 ) -> DownloadResult:
-    """
-    Download video (or audio) and return the local file path.
-    Runs in a thread pool to avoid blocking the event loop.
-    """
     loop = asyncio.get_event_loop()
     ts = int(time.time())
     out_template = os.path.join(TEMP_DIR, f"{user_id}_{ts}.%(ext)s")
 
     if audio_only:
-        opts = _build_audio_opts(out_template)
+        opts = _build_audio_opts(out_template, url)
     else:
-        opts = _build_video_opts(quality, out_template)
+        opts = _build_video_opts(quality, out_template, url)
 
     def _download():
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
             title = info.get("title", "video")
-            # Find the actual output file
             filename = ydl.prepare_filename(info)
-            # For audio, extension changes after post-processing
             if audio_only:
                 base = os.path.splitext(filename)[0]
                 for ext in ("mp3", "m4a", "ogg", "opus"):
@@ -170,7 +189,6 @@ async def download_video(
 
 
 def cleanup(file_path: str) -> None:
-    """Remove temporary file after sending."""
     try:
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
