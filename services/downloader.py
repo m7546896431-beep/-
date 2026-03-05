@@ -1,5 +1,6 @@
 """
 Core download logic powered by yt-dlp.
+Tries multiple YouTube clients in sequence until one works.
 """
 import asyncio
 import os
@@ -24,11 +25,15 @@ PLATFORM_PATTERNS = {
     "Instagram": re.compile(r"instagram\.com"),
 }
 
-YT_EXTRACTOR_ARGS = {
-    "youtube": {
-        "player_client": ["android", "web"]
-    }
-}
+# Список клиентов — пробуем по очереди пока один не сработает
+YT_CLIENTS = [
+    ["android"],
+    ["android_vr"],
+    ["android_embedded"],
+    ["ios"],
+    ["web"],
+    ["mweb"],
+]
 
 
 def detect_platform(url: str) -> Optional[str]:
@@ -66,83 +71,89 @@ def _fmt_duration(seconds) -> str:
         return "неизвестно"
 
 
+def _is_youtube(url: str) -> bool:
+    return "youtube" in url or "youtu.be" in url
+
+
 def _cookies_for(url: str) -> Optional[str]:
-    if "youtube" in url or "youtu.be" in url:
-        if os.path.exists(YOUTUBE_COOKIES):
-            return YOUTUBE_COOKIES
     if "instagram" in url:
         if os.path.exists(INSTAGRAM_COOKIES):
             return INSTAGRAM_COOKIES
     return None
 
 
+def _make_opts(base: dict, url: str, client: list) -> dict:
+    """Add extractor_args to opts. No cookies for YouTube android clients."""
+    opts = dict(base)
+    opts["extractor_args"] = {"youtube": {"player_client": client}}
+    cookies = _cookies_for(url)
+    if cookies:
+        opts["cookiefile"] = cookies
+    return opts
+
+
 async def fetch_info(url: str) -> VideoInfo:
     loop = asyncio.get_event_loop()
+    is_yt = _is_youtube(url)
+    clients = YT_CLIENTS if is_yt else [["web"]]
 
-    def _extract():
-        opts = {
-            "quiet": True,
-            "skip_download": True,
-            "noplaylist": True,
-            "extractor_args": YT_EXTRACTOR_ARGS,
-        }
-        cookies = _cookies_for(url)
-        if cookies:
-            opts["cookiefile"] = cookies
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            return ydl.extract_info(url, download=False)
-
-    info = await asyncio.wait_for(
-        loop.run_in_executor(None, _extract), timeout=30
-    )
-
-    platform = detect_platform(url) or "Unknown"
-    return VideoInfo(
-        title=info.get("title", "Unknown"),
-        duration=info.get("duration", 0),
-        thumbnail=info.get("thumbnail"),
-        platform=platform,
-        url=url,
-    )
-
-
-def _build_video_opts(quality: str, out_template: str, url: str = "") -> dict:
-    height = int(quality)
-    opts = {
+    base_opts = {
         "quiet": True,
+        "skip_download": True,
         "noplaylist": True,
-        "outtmpl": out_template,
-        "extractor_args": YT_EXTRACTOR_ARGS,
-        "format": (
-            f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]"
-            f"/bestvideo[height<={height}]+bestaudio"
-            f"/best[height<={height}]"
-            f"/best"
-        ),
-        "merge_output_format": "mp4",
-        "postprocessors": [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}],
     }
-    cookies = _cookies_for(url)
-    if cookies:
-        opts["cookiefile"] = cookies
-    return opts
+
+    last_error = None
+    for client in clients:
+        opts = _make_opts(base_opts, url, client) if is_yt else base_opts
+        if not is_yt:
+            cookies = _cookies_for(url)
+            if cookies:
+                opts["cookiefile"] = cookies
+
+        def _extract(o=opts):
+            with yt_dlp.YoutubeDL(o) as ydl:
+                return ydl.extract_info(url, download=False)
+
+        try:
+            info = await asyncio.wait_for(
+                loop.run_in_executor(None, _extract), timeout=30
+            )
+            # Проверяем что есть форматы
+            formats = info.get("formats") or []
+            has_video = any(
+                f.get("vcodec", "none") != "none" or f.get("acodec", "none") != "none"
+                for f in formats
+            )
+            if not has_video and is_yt:
+                logger.warning(f"Client {client} returned no video formats, trying next...")
+                last_error = "No video formats"
+                continue
+
+            platform = detect_platform(url) or "Unknown"
+            logger.info(f"fetch_info success with client {client}")
+            return VideoInfo(
+                title=info.get("title", "Unknown"),
+                duration=info.get("duration", 0),
+                thumbnail=info.get("thumbnail"),
+                platform=platform,
+                url=url,
+            )
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(f"Client {client} failed: {e}")
+            continue
+
+    raise Exception(last_error or "All clients failed")
 
 
-def _build_audio_opts(out_template: str, url: str = "") -> dict:
-    opts = {
-        "quiet": True,
-        "noplaylist": True,
-        "outtmpl": out_template,
-        "extractor_args": YT_EXTRACTOR_ARGS,
-        "format": "bestaudio/best",
-        "postprocessors": [
-            {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
-        ],
-    }
-    cookies = _cookies_for(url)
-    if cookies:
-        opts["cookiefile"] = cookies
-    return opts
+def _base_video_format(height: int) -> str:
+    return (
+        f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]"
+        f"/bestvideo[height<={height}]+bestaudio"
+        f"/best[height<={height}]"
+        f"/best"
+    )
 
 
 async def download_video(
@@ -154,39 +165,74 @@ async def download_video(
     loop = asyncio.get_event_loop()
     ts = int(time.time())
     out_template = os.path.join(TEMP_DIR, f"{user_id}_{ts}.%(ext)s")
+    is_yt = _is_youtube(url)
+    clients = YT_CLIENTS if is_yt else [["web"]]
 
     if audio_only:
-        opts = _build_audio_opts(out_template, url)
+        base_opts = {
+            "quiet": True,
+            "noplaylist": True,
+            "outtmpl": out_template,
+            "format": "bestaudio/best",
+            "postprocessors": [
+                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
+            ],
+        }
     else:
-        opts = _build_video_opts(quality, out_template, url)
+        height = int(quality)
+        base_opts = {
+            "quiet": True,
+            "noplaylist": True,
+            "outtmpl": out_template,
+            "format": _base_video_format(height),
+            "merge_output_format": "mp4",
+            "postprocessors": [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}],
+        }
 
-    def _download():
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            title = info.get("title", "video")
-            filename = ydl.prepare_filename(info)
-            if audio_only:
-                base = os.path.splitext(filename)[0]
-                for ext in ("mp3", "m4a", "ogg", "opus"):
-                    candidate = f"{base}.{ext}"
-                    if os.path.exists(candidate):
-                        return candidate, title
-            else:
-                base = os.path.splitext(filename)[0]
-                for ext in ("mp4", "mkv", "webm"):
-                    candidate = f"{base}.{ext}"
-                    if os.path.exists(candidate):
-                        return candidate, title
-                if os.path.exists(filename):
-                    return filename, title
-            return filename, title
+    last_error = None
+    for client in clients:
+        opts = _make_opts(base_opts, url, client) if is_yt else dict(base_opts)
+        if not is_yt:
+            cookies = _cookies_for(url)
+            if cookies:
+                opts["cookiefile"] = cookies
 
-    file_path, title = await asyncio.wait_for(
-        loop.run_in_executor(None, _download),
-        timeout=DOWNLOAD_TIMEOUT,
-    )
+        def _download(o=opts):
+            with yt_dlp.YoutubeDL(o) as ydl:
+                info = ydl.extract_info(url, download=True)
+                title = info.get("title", "video")
+                filename = ydl.prepare_filename(info)
+                if audio_only:
+                    base = os.path.splitext(filename)[0]
+                    for ext in ("mp3", "m4a", "ogg", "opus"):
+                        candidate = f"{base}.{ext}"
+                        if os.path.exists(candidate):
+                            return candidate, title
+                else:
+                    base = os.path.splitext(filename)[0]
+                    for ext in ("mp4", "mkv", "webm"):
+                        candidate = f"{base}.{ext}"
+                        if os.path.exists(candidate):
+                            return candidate, title
+                    if os.path.exists(filename):
+                        return filename, title
+                return filename, title
 
-    return DownloadResult(file_path=file_path, title=title, is_audio=audio_only)
+        try:
+            file_path, title = await asyncio.wait_for(
+                loop.run_in_executor(None, _download),
+                timeout=DOWNLOAD_TIMEOUT,
+            )
+            if file_path and os.path.exists(file_path):
+                logger.info(f"download success with client {client}")
+                return DownloadResult(file_path=file_path, title=title, is_audio=audio_only)
+            last_error = "File not found after download"
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(f"Download client {client} failed: {e}")
+            continue
+
+    raise Exception(last_error or "All download clients failed")
 
 
 def cleanup(file_path: str) -> None:
