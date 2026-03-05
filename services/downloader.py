@@ -26,7 +26,7 @@ PLATFORM_PATTERNS = {
 
 YT_EXTRACTOR_ARGS = {
     "youtube": {
-        "player_client": ["tv_embedded", "mweb"]
+        "player_client": ["android", "web"]
     }
 }
 
