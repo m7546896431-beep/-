@@ -22,16 +22,48 @@ FX_POOP  = "5046589136895476101"
 _active_downloads: dict[int, bool] = {}
 
 
-def _fmt_duration(seconds: int) -> str:
-    if not seconds:
+def _fmt_duration(seconds) -> str:
+    try:
+        seconds = int(seconds or 0)  # ← фикс: float → int
+        if not seconds:
+            return "неизвестно"
+        m, s = divmod(seconds, 60)
+        h, m = divmod(m, 60)
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+    except Exception:
         return "неизвестно"
-    m, s = divmod(seconds, 60)
-    h, m = divmod(m, 60)
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
 def _is_url(text: str) -> bool:
     return text.startswith(("http://", "https://")) and "." in text
+
+
+async def _animate_status(msg: Message, base_text: str, stop_event: asyncio.Event):
+    """Анимирует сообщение иконками пока идёт загрузка."""
+    frames = ["⏳", "⌛"]
+    i = 0
+    while not stop_event.is_set():
+        try:
+            icon = frames[i % len(frames)]
+            await msg.edit_text(
+                f"╭─────────────────────\n"
+                f"│ {icon} <b>{base_text}</b>\n"
+                f"╰─────────────────────",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        i += 1
+        await asyncio.sleep(1.2)
+
+
+async def _delete_after(msg: Message, delay: float = 5.0):
+    """Удаляет сообщение через delay секунд."""
+    await asyncio.sleep(delay)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
 
 
 @router.message(F.text.func(_is_url))
@@ -41,7 +73,7 @@ async def handle_url(message: Message):
 
     platform = detect_platform(url)
     if not platform:
-        await message.answer(
+        err = await message.answer(
             f"╭━━━━━━━━━━━━━━━━━━━━━╮\n"
             f"┃   ✖️  <b>Ссылка не найдена</b>  ┃\n"
             f"╰━━━━━━━━━━━━━━━━━━━━━╯\n\n"
@@ -53,6 +85,7 @@ async def handle_url(message: Message):
             parse_mode="HTML",
             message_effect_id=FX_POOP,
         )
+        asyncio.create_task(_delete_after(err, 8))
         return
 
     premium = db.is_premium(user_id)
@@ -71,14 +104,22 @@ async def handle_url(message: Message):
 
     status_msg = await message.answer(
         f"╭─────────────────────\n"
-        f"│ 🔍 <b>Получаю информацию…</b>\n"
+        f"│ ⏳ <b>Получаю информацию…</b>\n"
         f"╰─────────────────────",
         parse_mode="HTML",
+    )
+
+    # Запускаем анимацию ожидания
+    stop_event = asyncio.Event()
+    anim_task = asyncio.create_task(
+        _animate_status(status_msg, "Получаю информацию…", stop_event)
     )
 
     try:
         info = await fetch_info(url)
     except asyncio.TimeoutError:
+        stop_event.set()
+        anim_task.cancel()
         await status_msg.edit_text(
             f"╭━━━━━━━━━━━━━━━━━━━━━╮\n"
             f"┃     ✖️  <b>Таймаут</b>       ┃\n"
@@ -87,8 +128,11 @@ async def handle_url(message: Message):
             f"<blockquote>Попробуй ещё раз позже.</blockquote>",
             parse_mode="HTML",
         )
+        asyncio.create_task(_delete_after(status_msg, 6))
         return
     except Exception as e:
+        stop_event.set()
+        anim_task.cancel()
         logger.error(f"fetch_info error: {e}")
         await status_msg.edit_text(
             f"╭━━━━━━━━━━━━━━━━━━━━━╮\n"
@@ -100,7 +144,11 @@ async def handle_url(message: Message):
             f"▪️ Попробуй позже</blockquote>",
             parse_mode="HTML",
         )
+        asyncio.create_task(_delete_after(status_msg, 8))
         return
+
+    stop_event.set()
+    anim_task.cancel()
 
     icons = {"YouTube": "🔴", "TikTok": "🎵", "Instagram": "📸"}
     icon  = icons.get(info.platform, "🎬")
@@ -138,13 +186,14 @@ async def handle_download_callback(callback: CallbackQuery):
     user_id = callback.from_user.id
 
     if _active_downloads.get(user_id):
-        await callback.message.answer(
+        warn = await callback.message.answer(
             f"╭─────────────────────\n"
             f"│ ⏳ <b>Уже скачивается…</b>\n"
             f"│ Подожди немного!\n"
             f"╰─────────────────────",
             parse_mode="HTML",
         )
+        asyncio.create_task(_delete_after(warn, 4))
         return
 
     parts = callback.data.split("|", 2)
@@ -185,6 +234,12 @@ async def handle_download_callback(callback: CallbackQuery):
         message_effect_id=FX_FIRE,
     )
 
+    # Анимация во время скачивания
+    stop_event = asyncio.Event()
+    anim_task = asyncio.create_task(
+        _animate_status(status_msg, f"Скачиваю {label}…", stop_event)
+    )
+
     _active_downloads[user_id] = True
     file_path = None
     try:
@@ -197,6 +252,9 @@ async def handle_download_callback(callback: CallbackQuery):
         file_path = result.file_path
         size_mb   = os.path.getsize(file_path) / (1024 * 1024)
 
+        stop_event.set()
+        anim_task.cancel()
+
         if size_mb > MAX_FILE_SIZE_MB:
             await status_msg.edit_text(
                 f"╭━━━━━━━━━━━━━━━━━━━━━╮\n"
@@ -207,6 +265,7 @@ async def handle_download_callback(callback: CallbackQuery):
                 f"🔙 Попробуй выбрать качество ниже.",
                 parse_mode="HTML",
             )
+            asyncio.create_task(_delete_after(status_msg, 8))
             return
 
         await status_msg.edit_text(
@@ -260,8 +319,12 @@ async def handle_download_callback(callback: CallbackQuery):
             f"╰ 💬 Хочешь ещё? Просто пришли ссылку!",
             parse_mode="HTML",
         )
+        # Авто-удаление сообщения "Готово!" через 6 секунд
+        asyncio.create_task(_delete_after(status_msg, 6))
 
     except asyncio.TimeoutError:
+        stop_event.set()
+        anim_task.cancel()
         await status_msg.edit_text(
             f"╭━━━━━━━━━━━━━━━━━━━━━╮\n"
             f"┃     ✖️  <b>Таймаут</b>       ┃\n"
@@ -271,7 +334,10 @@ async def handle_download_callback(callback: CallbackQuery):
             parse_mode="HTML",
             message_effect_id=FX_POOP,
         )
+        asyncio.create_task(_delete_after(status_msg, 8))
     except Exception as e:
+        stop_event.set()
+        anim_task.cancel()
         logger.error(f"Download error for user {user_id}: {e}")
         await status_msg.edit_text(
             f"╭━━━━━━━━━━━━━━━━━━━━━╮\n"
@@ -284,6 +350,7 @@ async def handle_download_callback(callback: CallbackQuery):
             parse_mode="HTML",
             message_effect_id=FX_POOP,
         )
+        asyncio.create_task(_delete_after(status_msg, 8))
     finally:
         _active_downloads.pop(user_id, None)
         if file_path:
@@ -330,3 +397,4 @@ async def handle_cancel(callback: CallbackQuery):
 async def handle_back(callback: CallbackQuery):
     await callback.answer()
     await callback.message.delete()
+
