@@ -1,62 +1,47 @@
 """
-Core download logic powered by yt-dlp.
-Tries multiple YouTube clients in sequence until one works.
+Handler flow:
+  1. User sends a URL  → bot extracts info, shows preview + quality buttons
+  2. User taps quality → bot downloads, sends file, cleans up
 """
 import asyncio
-import os
-import re
-import time
 import logging
-from dataclasses import dataclass
-from typing import Optional
+import os
+import uuid
 
-import yt_dlp
+from aiogram import Router, F
+from aiogram.types import Message, CallbackQuery, FSInputFile
 
-from config import TEMP_DIR, DOWNLOAD_TIMEOUT
+import database as db
+from config import FREE_DAILY_LIMIT, FREE_MAX_QUALITY, MAX_FILE_SIZE_MB
+from keyboards import quality_keyboard, premium_keyboard
+from services.downloader import (
+    detect_platform,
+    fetch_info,
+    download_video,
+    cleanup,
+)
 
+router = Router()
 logger = logging.getLogger(__name__)
 
-YOUTUBE_COOKIES   = "/app/cookies/youtube_cookies.txt"
-INSTAGRAM_COOKIES = "/app/cookies/instagram_cookies.txt"
+FX_PARTY = "5046509860389126442"
+FX_LIKE  = "5107584321108051014"
+FX_FIRE  = "5104841245755180586"
+FX_HEART = "5159385139981059251"
+FX_POOP  = "5046589136895476101"
 
-PLATFORM_PATTERNS = {
-    "YouTube":   re.compile(r"(youtube\.com|youtu\.be)"),
-    "TikTok":    re.compile(r"tiktok\.com"),
-    "Instagram": re.compile(r"instagram\.com"),
-}
-
-# Список клиентов — пробуем по очереди пока один не сработает
-YT_CLIENTS = [
-    ["android"],
-    ["android_vr"],
-    ["android_embedded"],
-    ["ios"],
-    ["web"],
-    ["mweb"],
-]
+_active_downloads: dict[int, bool] = {}
+_url_store: dict[str, str] = {}
 
 
-def detect_platform(url: str) -> Optional[str]:
-    for name, pattern in PLATFORM_PATTERNS.items():
-        if pattern.search(url):
-            return name
-    return None
+def _save_url(url: str) -> str:
+    key = uuid.uuid4().hex[:8]
+    _url_store[key] = url
+    return key
 
 
-@dataclass
-class VideoInfo:
-    title: str
-    duration: int
-    thumbnail: Optional[str]
-    platform: str
-    url: str
-
-
-@dataclass
-class DownloadResult:
-    file_path: str
-    title: str
-    is_audio: bool
+def _get_url(key: str):
+    return _url_store.get(key)
 
 
 def _fmt_duration(seconds) -> str:
@@ -71,175 +56,212 @@ def _fmt_duration(seconds) -> str:
         return "неизвестно"
 
 
-def _is_youtube(url: str) -> bool:
-    return "youtube" in url or "youtu.be" in url
+def _is_url(text: str) -> bool:
+    return text.startswith(("http://", "https://")) and "." in text
 
 
-def _cookies_for(url: str) -> Optional[str]:
-    if "instagram" in url:
-        if os.path.exists(INSTAGRAM_COOKIES):
-            return INSTAGRAM_COOKIES
-    return None
-
-
-def _make_opts(base: dict, url: str, client: list) -> dict:
-    """Add extractor_args to opts. No cookies for YouTube android clients."""
-    opts = dict(base)
-    opts["extractor_args"] = {"youtube": {"player_client": client}}
-    cookies = _cookies_for(url)
-    if cookies:
-        opts["cookiefile"] = cookies
-    return opts
-
-
-async def fetch_info(url: str) -> VideoInfo:
-    loop = asyncio.get_event_loop()
-    is_yt = _is_youtube(url)
-    clients = YT_CLIENTS if is_yt else [["web"]]
-
-    base_opts = {
-        "quiet": True,
-        "skip_download": True,
-        "noplaylist": True,
-    }
-
-    last_error = None
-    for client in clients:
-        opts = _make_opts(base_opts, url, client) if is_yt else base_opts
-        if not is_yt:
-            cookies = _cookies_for(url)
-            if cookies:
-                opts["cookiefile"] = cookies
-
-        def _extract(o=opts):
-            with yt_dlp.YoutubeDL(o) as ydl:
-                return ydl.extract_info(url, download=False)
-
-        try:
-            info = await asyncio.wait_for(
-                loop.run_in_executor(None, _extract), timeout=30
-            )
-            # Проверяем что есть форматы
-            formats = info.get("formats") or []
-            has_video = any(
-                f.get("vcodec", "none") != "none" or f.get("acodec", "none") != "none"
-                for f in formats
-            )
-            if not has_video and is_yt:
-                logger.warning(f"Client {client} returned no video formats, trying next...")
-                last_error = "No video formats"
-                continue
-
-            platform = detect_platform(url) or "Unknown"
-            logger.info(f"fetch_info success with client {client}")
-            return VideoInfo(
-                title=info.get("title", "Unknown"),
-                duration=info.get("duration", 0),
-                thumbnail=info.get("thumbnail"),
-                platform=platform,
-                url=url,
-            )
-        except Exception as e:
-            last_error = str(e)
-            logger.warning(f"Client {client} failed: {e}")
-            continue
-
-    raise Exception(last_error or "All clients failed")
-
-
-def _base_video_format(height: int) -> str:
-    return (
-        f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]"
-        f"/bestvideo[height<={height}]+bestaudio"
-        f"/best[height<={height}]"
-        f"/best"
-    )
-
-
-async def download_video(
-    url: str,
-    quality: str = "720",
-    audio_only: bool = False,
-    user_id: int = 0,
-) -> DownloadResult:
-    loop = asyncio.get_event_loop()
-    ts = int(time.time())
-    out_template = os.path.join(TEMP_DIR, f"{user_id}_{ts}.%(ext)s")
-    is_yt = _is_youtube(url)
-    clients = YT_CLIENTS if is_yt else [["web"]]
-
-    if audio_only:
-        base_opts = {
-            "quiet": True,
-            "noplaylist": True,
-            "outtmpl": out_template,
-            "format": "bestaudio/best",
-            "postprocessors": [
-                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
-            ],
-        }
-    else:
-        height = int(quality)
-        base_opts = {
-            "quiet": True,
-            "noplaylist": True,
-            "outtmpl": out_template,
-            "format": _base_video_format(height),
-            "merge_output_format": "mp4",
-            "postprocessors": [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}],
-        }
-
-    last_error = None
-    for client in clients:
-        opts = _make_opts(base_opts, url, client) if is_yt else dict(base_opts)
-        if not is_yt:
-            cookies = _cookies_for(url)
-            if cookies:
-                opts["cookiefile"] = cookies
-
-        def _download(o=opts):
-            with yt_dlp.YoutubeDL(o) as ydl:
-                info = ydl.extract_info(url, download=True)
-                title = info.get("title", "video")
-                filename = ydl.prepare_filename(info)
-                if audio_only:
-                    base = os.path.splitext(filename)[0]
-                    for ext in ("mp3", "m4a", "ogg", "opus"):
-                        candidate = f"{base}.{ext}"
-                        if os.path.exists(candidate):
-                            return candidate, title
-                else:
-                    base = os.path.splitext(filename)[0]
-                    for ext in ("mp4", "mkv", "webm"):
-                        candidate = f"{base}.{ext}"
-                        if os.path.exists(candidate):
-                            return candidate, title
-                    if os.path.exists(filename):
-                        return filename, title
-                return filename, title
-
-        try:
-            file_path, title = await asyncio.wait_for(
-                loop.run_in_executor(None, _download),
-                timeout=DOWNLOAD_TIMEOUT,
-            )
-            if file_path and os.path.exists(file_path):
-                logger.info(f"download success with client {client}")
-                return DownloadResult(file_path=file_path, title=title, is_audio=audio_only)
-            last_error = "File not found after download"
-        except Exception as e:
-            last_error = str(e)
-            logger.warning(f"Download client {client} failed: {e}")
-            continue
-
-    raise Exception(last_error or "All download clients failed")
-
-
-def cleanup(file_path: str) -> None:
+async def _safe_edit(msg: Message, text: str, **kwargs) -> None:
     try:
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
-            logger.info(f"Cleaned up: {file_path}")
+        await msg.edit_text(text, **kwargs)
+    except Exception:
+        try:
+            await msg.answer(text, **kwargs)
+        except Exception as e:
+            logger.warning(f"_safe_edit failed: {e}")
+
+
+@router.message(F.text.func(_is_url))
+async def handle_url(message: Message):
+    user_id = message.from_user.id
+    url = message.text.strip()
+
+    platform = detect_platform(url)
+    if not platform:
+        await message.answer(
+            "╭─────────────────────\n"
+            "│  ✖️ <b>Ссылка не поддерживается</b>\n"
+            "╰─────────────────────\n\n"
+            "<blockquote>Поддерживаются:\n▪️ YouTube\n▪️ TikTok\n▪️ Instagram</blockquote>",
+            parse_mode="HTML",
+            message_effect_id=FX_POOP,
+        )
+        return
+
+    premium = db.is_premium(user_id)
+    if not premium and db.get_daily_count(user_id) >= FREE_DAILY_LIMIT:
+        await message.answer(
+            f"╭─────────────────────\n"
+            f"│  ⛔ <b>Лимит исчерпан</b>\n"
+            f"╰─────────────────────\n\n"
+            f"Ты достиг лимита <b>{FREE_DAILY_LIMIT} загрузок</b> в день.\n\n"
+            f"<blockquote>⭐ Оформи Premium для безлимитных загрузок</blockquote>",
+            parse_mode="HTML",
+            reply_markup=premium_keyboard(),
+        )
+        return
+
+    status_msg = await message.answer("⏳ <b>Получаю информацию о видео…</b>", parse_mode="HTML")
+
+    try:
+        info = await fetch_info(url)
+    except asyncio.TimeoutError:
+        await _safe_edit(status_msg,
+            "╭─────────────────────\n│  ✖️ <b>Таймаут</b>\n╰─────────────────────\n\n"
+            "Превышено время ожидания. Попробуй позже.",
+            parse_mode="HTML")
+        return
     except Exception as e:
-        logger.warning(f"Could not delete {file_path}: {e}")
+        logger.error(f"fetch_info error: {e}")
+        await _safe_edit(status_msg,
+            "╭─────────────────────\n│  ✖️ <b>Ошибка</b>\n╰─────────────────────\n\n"
+            "Не удалось получить информацию о видео.\n"
+            "<blockquote>Проверь ссылку или попробуй позже.</blockquote>",
+            parse_mode="HTML")
+        return
+
+    url_key = _save_url(url)
+    caption = (
+        f"╭─────────────────────\n"
+        f"│  🎬 <b>{info.title}</b>\n"
+        f"╰─────────────────────\n\n"
+        f"├ 📌 Платформа: <b>{info.platform}</b>\n"
+        f"├ ⏱ Длительность: <code>{_fmt_duration(info.duration)}</code>\n\n"
+        f"👇 <b>Выбери качество:</b>"
+    )
+    kb = quality_keyboard(url_key, premium)
+
+    try:
+        if info.thumbnail:
+            await status_msg.delete()
+            await message.answer_photo(photo=info.thumbnail, caption=caption,
+                                       parse_mode="HTML", reply_markup=kb)
+        else:
+            await _safe_edit(status_msg, caption, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        await _safe_edit(status_msg, caption, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("dl|"))
+async def handle_download_callback(callback: CallbackQuery):
+    await callback.answer()
+    user_id = callback.from_user.id
+
+    if _active_downloads.get(user_id):
+        await callback.message.answer(
+            "⏳ <b>Подожди</b> — твоё предыдущее видео ещё загружается.", parse_mode="HTML")
+        return
+
+    parts = callback.data.split("|", 2)
+    if len(parts) != 3:
+        return
+
+    _, quality_raw, url_key = parts
+    audio_only = quality_raw == "audio"
+
+    url = _get_url(url_key)
+    if not url:
+        await callback.message.answer(
+            "✖️ <b>Ссылка устарела.</b> Отправь видео заново.", parse_mode="HTML")
+        return
+
+    premium = db.is_premium(user_id)
+    if not premium and db.get_daily_count(user_id) >= FREE_DAILY_LIMIT:
+        await callback.message.answer(
+            "╭─────────────────────\n│  ⛔ <b>Лимит исчерпан</b>\n╰─────────────────────\n\n"
+            "Оформи Premium для продолжения:",
+            parse_mode="HTML", reply_markup=premium_keyboard())
+        return
+
+    if not premium and not audio_only:
+        quality = str(min(int(quality_raw), int(FREE_MAX_QUALITY)))
+    elif audio_only:
+        quality = "audio"
+    else:
+        quality = quality_raw
+
+    label = "🎵 MP3" if audio_only else f"📺 {quality}p"
+    status_msg = await callback.message.answer(
+        f"🔥 <b>Скачиваю {label}…</b>\n"
+        f"<blockquote>Это может занять немного времени ⏳</blockquote>",
+        parse_mode="HTML", message_effect_id=FX_FIRE)
+
+    _active_downloads[user_id] = True
+    file_path = None
+    try:
+        result = await download_video(
+            url=url,
+            quality=quality if not audio_only else "720",
+            audio_only=audio_only,
+            user_id=user_id,
+        )
+        file_path = result.file_path
+
+        size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        if size_mb > MAX_FILE_SIZE_MB:
+            await _safe_edit(status_msg,
+                f"⚠️ <b>Файл слишком большой</b>\n\n"
+                f"<blockquote>Размер: <code>{size_mb:.1f} МБ</code>\n"
+                f"Лимит Telegram: <code>{MAX_FILE_SIZE_MB} МБ</code></blockquote>\n\n"
+                f"Попробуй выбрать качество ниже.",
+                parse_mode="HTML")
+            return
+
+        await _safe_edit(status_msg, "📤 <b>Отправляю файл…</b>", parse_mode="HTML")
+        input_file = FSInputFile(file_path, filename=os.path.basename(file_path))
+
+        if audio_only:
+            await callback.message.answer_audio(
+                audio=input_file, title=result.title,
+                caption=f"🎵 <b>{result.title}</b>",
+                parse_mode="HTML", message_effect_id=FX_LIKE)
+        else:
+            await callback.message.answer_video(
+                video=input_file,
+                caption=f"🎬 <b>{result.title}</b> — <code>{quality}p</code>",
+                parse_mode="HTML", supports_streaming=True, message_effect_id=FX_PARTY)
+
+        db.increment_daily_count(user_id)
+        remaining = "∞" if premium else str(max(0, FREE_DAILY_LIMIT - db.get_daily_count(user_id)))
+        await _safe_edit(status_msg,
+            f"╭─────────────────────\n│  ✔️ <b>Готово!</b>\n╰─────────────────────\n\n"
+            f"├ 📥 Загрузок сегодня осталось: <b>{remaining}</b>",
+            parse_mode="HTML")
+
+    except asyncio.TimeoutError:
+        await _safe_edit(status_msg,
+            "╭─────────────────────\n│  ✖️ <b>Таймаут</b>\n╰─────────────────────\n\n"
+            "Превышено время ожидания. Попробуй позже.",
+            parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Download error for user {user_id}: {e}")
+        await _safe_edit(status_msg,
+            "╭─────────────────────\n│  ✖️ <b>Ошибка скачивания</b>\n╰─────────────────────\n\n"
+            "<blockquote>▪️ Видео недоступно или приватное\n"
+            "▪️ Временные проблемы с платформой</blockquote>\n\n"
+            "🔙 Попробуй позже.",
+            parse_mode="HTML")
+    finally:
+        _active_downloads.pop(user_id, None)
+        if file_path:
+            cleanup(file_path)
+
+
+@router.callback_query(F.data == "premium_prompt")
+async def handle_premium_prompt(callback: CallbackQuery):
+    await callback.answer("⭐ Это Premium-функция", show_alert=False)
+    await callback.message.answer(
+        "╭─────────────────────\n│  🔒 <b>Только для Premium</b>\n╰─────────────────────\n\n"
+        "Качество <code>1080p</code> доступно только Premium-пользователям.\n\n"
+        "<blockquote>⭐ Оформи подписку ниже 👇</blockquote>",
+        parse_mode="HTML", message_effect_id=FX_HEART, reply_markup=premium_keyboard())
+
+
+@router.callback_query(F.data == "donate")
+async def handle_donate(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(
+        "╭─────────────────────\n│  💝 <b>Донат</b>\n╰─────────────────────\n\n"
+        "Спасибо за желание поддержать проект!\n\n"
+        "<blockquote>👉 https://your-donate-link.com</blockquote>",
+        parse_mode="HTML", message_effect_id=FX_HEART)
 
