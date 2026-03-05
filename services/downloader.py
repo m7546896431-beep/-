@@ -1,6 +1,5 @@
 """
 Core download logic powered by yt-dlp.
-Returns local file path + metadata.
 """
 import asyncio
 import os
@@ -27,7 +26,7 @@ PLATFORM_PATTERNS = {
 
 YT_EXTRACTOR_ARGS = {
     "youtube": {
-        "player_client": ["ios", "web"]
+        "player_client": ["tv_embedded", "mweb"]
     }
 }
 
@@ -197,5 +196,4 @@ def cleanup(file_path: str) -> None:
             logger.info(f"Cleaned up: {file_path}")
     except Exception as e:
         logger.warning(f"Could not delete {file_path}: {e}")
-
 
