@@ -16,15 +16,19 @@ from config import TEMP_DIR, DOWNLOAD_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
-# Путь к cookies файлам (положи рядом с bot.py)
-YOUTUBE_COOKIES  = "/app/cookies/youtube_cookies.txt"
+YOUTUBE_COOKIES   = "/app/cookies/youtube_cookies.txt"
 INSTAGRAM_COOKIES = "/app/cookies/instagram_cookies.txt"
 
-# ─── Supported platforms ──────────────────────────────────────────────────────
 PLATFORM_PATTERNS = {
     "YouTube":   re.compile(r"(youtube\.com|youtu\.be)"),
     "TikTok":    re.compile(r"tiktok\.com"),
     "Instagram": re.compile(r"instagram\.com"),
+}
+
+YT_EXTRACTOR_ARGS = {
+    "youtube": {
+        "player_client": ["ios", "web"]
+    }
 }
 
 
@@ -35,7 +39,6 @@ def detect_platform(url: str) -> Optional[str]:
     return None
 
 
-# ─── Data classes ─────────────────────────────────────────────────────────────
 @dataclass
 class VideoInfo:
     title: str
@@ -52,7 +55,6 @@ class DownloadResult:
     is_audio: bool
 
 
-# ─── Duration formatter (fix: float duration crash) ──────────────────────────
 def _fmt_duration(seconds) -> str:
     try:
         seconds = int(seconds or 0)
@@ -65,7 +67,6 @@ def _fmt_duration(seconds) -> str:
         return "неизвестно"
 
 
-# ─── Cookies helper ───────────────────────────────────────────────────────────
 def _cookies_for(url: str) -> Optional[str]:
     if "youtube" in url or "youtu.be" in url:
         if os.path.exists(YOUTUBE_COOKIES):
@@ -76,7 +77,6 @@ def _cookies_for(url: str) -> Optional[str]:
     return None
 
 
-# ─── Info extraction ──────────────────────────────────────────────────────────
 async def fetch_info(url: str) -> VideoInfo:
     loop = asyncio.get_event_loop()
 
@@ -85,6 +85,7 @@ async def fetch_info(url: str) -> VideoInfo:
             "quiet": True,
             "skip_download": True,
             "noplaylist": True,
+            "extractor_args": YT_EXTRACTOR_ARGS,
         }
         cookies = _cookies_for(url)
         if cookies:
@@ -106,13 +107,13 @@ async def fetch_info(url: str) -> VideoInfo:
     )
 
 
-# ─── Download helpers ─────────────────────────────────────────────────────────
 def _build_video_opts(quality: str, out_template: str, url: str = "") -> dict:
     height = int(quality)
     opts = {
         "quiet": True,
         "noplaylist": True,
         "outtmpl": out_template,
+        "extractor_args": YT_EXTRACTOR_ARGS,
         "format": (
             f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]"
             f"/bestvideo[height<={height}]+bestaudio"
@@ -133,6 +134,7 @@ def _build_audio_opts(out_template: str, url: str = "") -> dict:
         "quiet": True,
         "noplaylist": True,
         "outtmpl": out_template,
+        "extractor_args": YT_EXTRACTOR_ARGS,
         "format": "bestaudio/best",
         "postprocessors": [
             {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
@@ -195,3 +197,5 @@ def cleanup(file_path: str) -> None:
             logger.info(f"Cleaned up: {file_path}")
     except Exception as e:
         logger.warning(f"Could not delete {file_path}: {e}")
+
+
