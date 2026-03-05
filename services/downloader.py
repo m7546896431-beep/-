@@ -147,12 +147,18 @@ async def fetch_info(url: str) -> VideoInfo:
 
 
 def _base_video_format(height: int) -> str:
+    # Только уже готовые форматы с видео+аудио — ffmpeg не нужен
     return (
-        f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]"
-        f"/bestvideo[height<={height}]+bestaudio"
+        f"best[height<={height}][ext=mp4]"
         f"/best[height<={height}]"
+        f"/best[ext=mp4]"
         f"/best"
     )
+
+
+def _audio_format() -> str:
+    # Скачиваем как есть, без конвертации через ffmpeg
+    return "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best"
 
 
 async def download_video(
@@ -172,10 +178,8 @@ async def download_video(
             "quiet": True,
             "noplaylist": True,
             "outtmpl": out_template,
-            "format": "bestaudio/best",
-            "postprocessors": [
-                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
-            ],
+            "format": _audio_format(),
+            # Без FFmpegExtractAudio — скачиваем m4a/mp3 напрямую
         }
     else:
         height = int(quality)
@@ -184,8 +188,7 @@ async def download_video(
             "noplaylist": True,
             "outtmpl": out_template,
             "format": _base_video_format(height),
-            "merge_output_format": "mp4",
-            "postprocessors": [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}],
+            # Без merge_output_format — не нужен ffmpeg
         }
 
     last_error = None
@@ -203,20 +206,17 @@ async def download_video(
                 info = ydl.extract_info(url, download=True)
                 title = info.get("title", "video")
                 filename = ydl.prepare_filename(info)
-                if audio_only:
-                    base = os.path.splitext(filename)[0]
-                    for ext in ("mp3", "m4a", "ogg", "opus"):
-                        candidate = f"{base}.{ext}"
-                        if os.path.exists(candidate):
-                            return candidate, title
-                else:
-                    base = os.path.splitext(filename)[0]
-                    for ext in ("mp4", "mkv", "webm"):
-                        candidate = f"{base}.{ext}"
-                        if os.path.exists(candidate):
-                            return candidate, title
-                    if os.path.exists(filename):
-                        return filename, title
+
+                # Ищем файл с любым расширением
+                base = os.path.splitext(filename)[0]
+                for ext in ("mp4", "mkv", "webm", "m4a", "mp3", "ogg", "opus", "m4v"):
+                    candidate = f"{base}.{ext}"
+                    if os.path.exists(candidate):
+                        return candidate, title
+
+                if os.path.exists(filename):
+                    return filename, title
+
                 return filename, title
 
         try:
