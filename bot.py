@@ -11,7 +11,7 @@ from aiogram.enums import ParseMode
 from config import BOT_TOKEN
 import database as db
 from handlers import common, downloader, admin, payment
-from middlewares.throttle import ThrottlingMiddleware
+from middlewares.throttle import ThrottleMiddleware
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,7 +30,7 @@ async def main():
     dp = Dispatcher()
 
     # Middlewares
-    dp.message.middleware(ThrottlingMiddleware())
+    dp.message.middleware(ThrottleMiddleware())
 
     # Routers
     dp.include_router(common.router)
@@ -45,3 +45,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
