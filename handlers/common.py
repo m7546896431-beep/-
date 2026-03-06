@@ -15,7 +15,7 @@ FX_HEART = "5159385139981059251"
 FX_POOP  = "5046589136895476101"
 
 # Сюда вставь новый file_id после того как получишь его отправив фото боту
-BANNER_FILE_ID = None
+BANNER_FILE_ID = "AgACAgIAAxkBAAMUaaqmIkNDlfV-ScThZFyAeIZnQGEAAs8XaxtiTlhJoaafrIiiAWoBAAMCAAN5AAM6BA"
 
 
 @router.message(CommandStart())
@@ -68,17 +68,6 @@ async def cmd_start(message: Message):
         )
 
 
-# ─── ВРЕМЕННЫЙ хендлер — отправь боту фото и получи file_id ─────────────────
-# После получения file_id: вставь его в BANNER_FILE_ID выше и удали этот хендлер
-@router.message(F.photo)
-async def get_photo_id(message: Message):
-    file_id = message.photo[-1].file_id
-    await message.answer(
-        f"✅ Твой новый BANNER_FILE_ID:\n\n<code>{file_id}</code>\n\n"
-        f"Вставь это в common.py в переменную BANNER_FILE_ID",
-        parse_mode="HTML",
-    )
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 @router.message(Command("help"))
@@ -179,3 +168,4 @@ async def cmd_profile(message: Message):
         )
 
     await message.answer(text, parse_mode="HTML")
+
