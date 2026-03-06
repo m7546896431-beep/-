@@ -15,7 +15,7 @@ FX_HEART = "5159385139981059251"
 FX_POOP  = "5046589136895476101"
 
 # Сюда вставь новый file_id после того как получишь его отправив фото боту
-BANNER_FILE_ID = "None"
+BANNER_FILE_ID = "AgACAgIAAxkBAAMUaaqmIkNDlfV-ScThZFyAeIZnQGEAAs8XaxtiTlhJoaafrIiiAWoBAAMCAAN5AAM6BA"
 
 
 @router.message(CommandStart())
@@ -171,4 +171,25 @@ async def cmd_profile(message: Message):
         )
 
     await message.answer(text, parse_mode="HTML")
+
+
+# ─── Обработчики кнопок главного меню ────────────────────────────────────────
+@router.message(F.text == "⬇️ Скачать видео")
+async def btn_download(message: Message):
+    await message.answer(
+        "🔗 Отправь мне ссылку на видео с YouTube, TikTok или Instagram!",
+        parse_mode="HTML",
+    )
+
+@router.message(F.text == "👤 Мой профиль")
+async def btn_profile(message: Message):
+    await cmd_profile(message)
+
+@router.message(F.text == "⭐ Premium")
+async def btn_premium(message: Message):
+    await cmd_premium(message)
+
+@router.message(F.text == "❓ Помощь")
+async def btn_help(message: Message):
+    await cmd_help(message)
 
