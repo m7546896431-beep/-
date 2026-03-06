@@ -56,7 +56,9 @@ def _fmt_duration(seconds) -> str:
         return "неизвестно"
 
 
-def _is_url(text: str) -> bool:
+def _is_url(text) -> bool:
+    if not text:
+        return False
     return text.startswith(("http://", "https://")) and "." in text
 
 
@@ -335,6 +337,4 @@ async def handle_donate(callback: CallbackQuery):
         parse_mode="HTML",
         message_effect_id=FX_HEART,
     )
-@router.message(F.photo)
-async def get_photo_id(message: Message):
-    await message.answer(f"<code>{message.photo[-1].file_id}</code>", parse_mode="HTML")
+
