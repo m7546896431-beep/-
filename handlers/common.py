@@ -14,7 +14,6 @@ FX_FIRE  = "5104841245755180586"
 FX_HEART = "5159385139981059251"
 FX_POOP  = "5046589136895476101"
 
-BANNER_FILE_ID = "AgACAgIAAxkBAAMCaasNCN3l3BuYU1mQ15CEnJkc8iwAAhAUaxufylhJ-zEwZvsKqJkBAAMCAAN5AAM6BA"
 
 
 @router.message(CommandStart())
@@ -50,8 +49,7 @@ async def cmd_start(message: Message):
             f'🔗 Просто отправь ссылку на видео!'
         )
 
-    await message.answer_photo(
-        photo=BANNER_FILE_ID,
+    await message.answer(
         caption=text,
         parse_mode="HTML",
         message_effect_id=FX_PARTY,
