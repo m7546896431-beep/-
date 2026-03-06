@@ -11,9 +11,8 @@ from aiogram.enums import ParseMode
 from config import BOT_TOKEN
 import database as db
 from handlers import common, downloader, admin, payment
-from middlewares.throttle import ThrottleMiddleware
-
-logging.basicConfig(
+from middlewares.throttle import ThrottleMiddleware 
+ogging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
