@@ -5,7 +5,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 # ─── Главное меню (Reply-кнопки внизу) ───────────────────────────────────────
-def main_menu_keyboard() -> ReplyKeyboardMarkup:
+def main_menu_keyboard(is_premium: bool = False) -> ReplyKeyboardMarkup:
     builder = ReplyKeyboardBuilder()
     builder.row(
         KeyboardButton(text="⬇️ Скачать видео"),
@@ -65,3 +65,4 @@ def back_keyboard() -> InlineKeyboardMarkup:
 
 # Алиас для совместимости
 main_keyboard = main_menu_keyboard
+
