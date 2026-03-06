@@ -50,7 +50,7 @@ async def cmd_start(message: Message):
         )
 
     await message.answer(
-        caption=text,
+        text=text,
         parse_mode="HTML",
         message_effect_id=FX_PARTY,
         reply_markup=main_menu_keyboard(premium),
