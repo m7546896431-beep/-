@@ -1,6 +1,6 @@
 """
 Оплата Premium через Telegram Stars.
-100 ⭐ = 30 дней Premium
+1 ⭐ = 30 дней Premium
 """
 import logging
 import datetime
@@ -18,8 +18,9 @@ import database as db
 router = Router()
 logger = logging.getLogger(__name__)
 
-PREMIUM_STARS  = 100
+PREMIUM_STARS  = 1
 PREMIUM_DAYS   = 30
+ADMIN_ID       = 5259105676
 
 FX_PARTY = "5046509860389126442"
 FX_HEART = "5159385139981059251"
@@ -30,7 +31,7 @@ def buy_keyboard():
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
-            text=f"⭐ Купить Premium — {PREMIUM_STARS} звёзд",
+            text=f"⭐ Купить Premium — {PREMIUM_STARS} звезда",
             callback_data="buy_stars",
         )
     )
@@ -49,7 +50,7 @@ async def send_invoice(callback: CallbackQuery):
             f"✔️ Приоритетная очередь"
         ),
         payload="premium_30d",
-        currency="XTR",           # Telegram Stars
+        currency="XTR",
         prices=[LabeledPrice(label="Premium 30 дней", amount=PREMIUM_STARS)],
         protect_content=False,
     )
@@ -57,7 +58,6 @@ async def send_invoice(callback: CallbackQuery):
 
 @router.pre_checkout_query()
 async def pre_checkout(query: PreCheckoutQuery):
-    """Telegram требует подтвердить платёж в течение 10 секунд."""
     await query.answer(ok=True)
 
 
@@ -65,6 +65,7 @@ async def pre_checkout(query: PreCheckoutQuery):
 async def successful_payment(message: Message):
     payment: SuccessfulPayment = message.successful_payment
     user_id = message.from_user.id
+    username = message.from_user.username or message.from_user.first_name
 
     if payment.invoice_payload == "premium_30d":
         until = str(datetime.date.today() + datetime.timedelta(days=PREMIUM_DAYS))
@@ -73,6 +74,7 @@ async def successful_payment(message: Message):
 
         logger.info(f"Premium bought: user={user_id} until={until} stars={payment.total_amount}")
 
+        # Уведомление пользователю
         await message.answer(
             f'<tg-emoji emoji-id="6041731551845159060">🎉</tg-emoji> <b>Premium активирован!</b>\n\n'
             f'<blockquote>'
@@ -85,4 +87,18 @@ async def successful_payment(message: Message):
             parse_mode="HTML",
             message_effect_id=FX_PARTY,
         )
+
+        # Уведомление админу
+        try:
+            await message.bot.send_message(
+                ADMIN_ID,
+                f'💰 <b>Новая покупка Premium!</b>\n\n'
+                f'👤 Пользователь: <a href="tg://user?id={user_id}">{username}</a>\n'
+                f'🆔 ID: <code>{user_id}</code>\n'
+                f'⭐ Звёзд: <b>{payment.total_amount}</b>\n'
+                f'📅 До: <code>{until}</code>',
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to notify admin: {e}")
 
