@@ -157,4 +157,6 @@ async def cmd_profile(message: Message):
         )
 
     await message.answer(text, parse_mode="HTML")
-
+@router.message(F.photo)
+async def get_photo_id(message: Message):
+    await message.answer(message.photo[-1].file_id)
