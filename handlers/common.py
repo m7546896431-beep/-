@@ -15,7 +15,7 @@ FX_HEART = "5159385139981059251"
 FX_POOP  = "5046589136895476101"
 
 # Сюда вставь новый file_id после того как получишь его отправив фото боту
-BANNER_FILE_ID = "AgACAgIAAxkBAAMUaaqmIkNDlfV-ScThZFyAeIZnQGEAAs8XaxtiTlhJoaafrIiiAWoBAAMCAAN5AAM6BA"
+BANNER_FILE_ID = "None"
 
 
 @router.message(CommandStart())
