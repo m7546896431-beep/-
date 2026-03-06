@@ -337,7 +337,5 @@ async def handle_donate(callback: CallbackQuery):
         parse_mode="HTML",
         message_effect_id=FX_HEART,
     )
-@router.message(F.photo)
-async def get_photo_id(message: Message):
-    await message.answer(f"<code>{message.photo[-1].file_id}</code>", parse_mode="HTML")
+
 
