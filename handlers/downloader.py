@@ -1,3 +1,8 @@
+"""
+Handler flow:
+  1. User sends a URL  → bot extracts info, shows preview + quality buttons
+  2. User taps quality → bot downloads, sends file, cleans up
+"""
 import asyncio
 import logging
 import os
@@ -8,8 +13,13 @@ from aiogram.types import Message, CallbackQuery, FSInputFile
 
 import database as db
 from config import FREE_DAILY_LIMIT, FREE_MAX_QUALITY, MAX_FILE_SIZE_MB
-from keyboards import quality_keyboard, premium_keyboard, main_menu_keyboard
-from services.downloader import detect_platform, fetch_info, download_video, cleanup
+from keyboards import quality_keyboard, premium_keyboard
+from services.downloader import (
+    detect_platform,
+    fetch_info,
+    download_video,
+    cleanup,
+)
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -21,22 +31,17 @@ FX_HEART = "5159385139981059251"
 FX_POOP  = "5046589136895476101"
 
 _active_downloads: dict[int, bool] = {}
-
-# Кэш URL: короткий ключ → полный URL
-# Telegram ограничивает callback_data до 64 байт,
-# поэтому URL передавать напрямую нельзя
-_url_cache: dict[str, str] = {}
+_url_store: dict[str, str] = {}
 
 
-def _store_url(url: str) -> str:
-    """Сохраняет URL в кэш и возвращает короткий ключ (8 символов)."""
+def _save_url(url: str) -> str:
     key = uuid.uuid4().hex[:8]
-    _url_cache[key] = url
+    _url_store[key] = url
     return key
 
 
-def _get_url(key: str) -> str | None:
-    return _url_cache.get(key)
+def _get_url(key: str):
+    return _url_store.get(key)
 
 
 def _fmt_duration(seconds) -> str:
@@ -55,33 +60,14 @@ def _is_url(text: str) -> bool:
     return text.startswith(("http://", "https://")) and "." in text
 
 
-async def _animate_status(msg: Message, base_text: str, stop_event: asyncio.Event):
-    """Анимирует сообщение иконками ⏳/⌛ пока идёт ожидание."""
-    frames = ["⏳", "⌛"]
-    i = 0
-    await asyncio.sleep(1.5)  # небольшая задержка перед стартом анимации
-    while not stop_event.is_set():
-        try:
-            icon = frames[i % len(frames)]
-            await msg.edit_text(
-                f"╭─────────────────────\n"
-                f"│ {icon} <b>{base_text}</b>\n"
-                f"╰─────────────────────",
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
-        i += 1
-        await asyncio.sleep(1.5)
-
-
-async def _delete_after(msg: Message, delay: float = 5.0):
-    """Удаляет сообщение через delay секунд."""
-    await asyncio.sleep(delay)
+async def _safe_edit(msg: Message, text: str, **kwargs) -> None:
     try:
-        await msg.delete()
+        await msg.edit_text(text, **kwargs)
     except Exception:
-        pass
+        try:
+            await msg.answer(text, **kwargs)
+        except Exception as e:
+            logger.warning(f"_safe_edit failed: {e}")
 
 
 @router.message(F.text.func(_is_url))
@@ -91,126 +77,69 @@ async def handle_url(message: Message):
 
     platform = detect_platform(url)
     if not platform:
-        err = await message.answer(
-            f"╭━━━━━━━━━━━━━━━━━━━━━╮\n"
-            f"┃   ✖️  <b>Ссылка не найдена</b>  ┃\n"
-            f"╰━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-            f"Эта платформа не поддерживается.\n\n"
-            f"<blockquote>✔️ Поддерживаются:\n"
-            f"  🔴 YouTube\n"
-            f"  🎵 TikTok\n"
-            f"  📸 Instagram</blockquote>",
+        await message.answer(
+            f'<tg-emoji emoji-id="5870657884844462243">❌</tg-emoji> <b>Ссылка не поддерживается</b>\n\n'
+            f'<blockquote>Поддерживаются:\n'
+            f'<tg-emoji emoji-id="5870528606328852614">📁</tg-emoji> YouTube\n'
+            f'<tg-emoji emoji-id="5870528606328852614">📁</tg-emoji> TikTok\n'
+            f'<tg-emoji emoji-id="5870528606328852614">📁</tg-emoji> Instagram</blockquote>',
             parse_mode="HTML",
             message_effect_id=FX_POOP,
         )
-        asyncio.create_task(_delete_after(err, 8))
         return
 
     premium = db.is_premium(user_id)
     if not premium and db.get_daily_count(user_id) >= FREE_DAILY_LIMIT:
         await message.answer(
-            f"╭━━━━━━━━━━━━━━━━━━━━━╮\n"
-            f"┃    ⛔  <b>Лимит исчерпан</b>    ┃\n"
-            f"╰━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-            f"Ты использовал все <b>{FREE_DAILY_LIMIT} загрузок</b> на сегодня.\n\n"
-            f"<blockquote>⭐ Оформи Premium и качай\n"
-            f"без ограничений!</blockquote>",
+            f'<tg-emoji emoji-id="6037249452824072506">🔒</tg-emoji> <b>Лимит исчерпан</b>\n\n'
+            f'Ты достиг лимита <b>{FREE_DAILY_LIMIT} загрузок</b> в день.\n\n'
+            f'<blockquote><tg-emoji emoji-id="6032644646587338669">🎁</tg-emoji> Оформи Premium для безлимитных загрузок</blockquote>',
             parse_mode="HTML",
             reply_markup=premium_keyboard(),
         )
         return
 
     status_msg = await message.answer(
-        f"╭─────────────────────\n"
-        f"│ ⏳ <b>Получаю информацию…</b>\n"
-        f"╰─────────────────────",
+        f'<tg-emoji emoji-id="5983150113483134607">⏰</tg-emoji> <b>Получаю информацию о видео…</b>',
         parse_mode="HTML",
-    )
-
-    stop_event = asyncio.Event()
-    anim_task = asyncio.create_task(
-        _animate_status(status_msg, "Получаю информацию…", stop_event)
     )
 
     try:
         info = await fetch_info(url)
     except asyncio.TimeoutError:
-        stop_event.set()
-        anim_task.cancel()
-        await asyncio.sleep(0.1)  # дать анимации завершиться
-        await status_msg.edit_text(
-            f"╭━━━━━━━━━━━━━━━━━━━━━╮\n"
-            f"┃     ✖️  <b>Таймаут</b>       ┃\n"
-            f"╰━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-            f"Превышено время ожидания.\n"
-            f"<blockquote>Попробуй ещё раз позже.</blockquote>",
-            parse_mode="HTML",
-        )
-        asyncio.create_task(_delete_after(status_msg, 6))
+        await _safe_edit(status_msg,
+            f'<tg-emoji emoji-id="5870657884844462243">❌</tg-emoji> <b>Таймаут</b>\n\n'
+            f'Превышено время ожидания. Попробуй позже.',
+            parse_mode="HTML")
         return
     except Exception as e:
-        stop_event.set()
-        anim_task.cancel()
-        await asyncio.sleep(0.1)
         logger.error(f"fetch_info error: {e}")
-        await status_msg.edit_text(
-            f"╭━━━━━━━━━━━━━━━━━━━━━╮\n"
-            f"┃   ✖️  <b>Ошибка загрузки</b>   ┃\n"
-            f"╰━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-            f"Не удалось получить информацию.\n\n"
-            f"<blockquote>▪️ Проверь правильность ссылки\n"
-            f"▪️ Видео может быть приватным\n"
-            f"▪️ Попробуй позже</blockquote>",
-            parse_mode="HTML",
-        )
-        asyncio.create_task(_delete_after(status_msg, 8))
+        await _safe_edit(status_msg,
+            f'<tg-emoji emoji-id="5870657884844462243">❌</tg-emoji> <b>Ошибка</b>\n\n'
+            f'Не удалось получить информацию о видео.\n'
+            f'<blockquote>Проверь ссылку или попробуй позже.</blockquote>',
+            parse_mode="HTML")
         return
 
-    # Останавливаем анимацию и ждём её завершения
-    stop_event.set()
-    anim_task.cancel()
-    await asyncio.sleep(0.1)
-
-    # Сохраняем URL в кэш и получаем короткий ключ
-    url_key = _store_url(url)
-
-    icons = {"YouTube": "🔴", "TikTok": "🎵", "Instagram": "📸"}
-    icon  = icons.get(info.platform, "🎬")
+    url_key = _save_url(url)
 
     caption = (
-        f"╭━━━━━━━━━━━━━━━━━━━━━╮\n"
-        f"┃   {icon}  <b>Видео найдено!</b>    ┃\n"
-        f"╰━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-        f"🎬 <b>{info.title}</b>\n\n"
-        f"├ 📌 Платформа: <b>{info.platform}</b>\n"
-        f"├ ⏱ Длительность: <code>{_fmt_duration(info.duration)}</code>\n\n"
-        f"👇 <b>Выбери качество:</b>"
+        f'<tg-emoji emoji-id="6035128606563241721">🖼</tg-emoji> <b>{info.title}</b>\n\n'
+        f'<tg-emoji emoji-id="5770261166702546286">📌</tg-emoji> Платформа: <b>{info.platform}</b>\n'
+        f'<tg-emoji emoji-id="5983150113483134607">⏰</tg-emoji> Длительность: <code>{_fmt_duration(info.duration)}</code>\n\n'
+        f'<tg-emoji emoji-id="6039802767931871481">⬇</tg-emoji> <b>Выбери качество:</b>'
     )
+    kb = quality_keyboard(url_key, premium)
 
     try:
         if info.thumbnail:
             await status_msg.delete()
-            await message.answer_photo(
-                photo=info.thumbnail,
-                caption=caption,
-                parse_mode="HTML",
-                reply_markup=quality_keyboard(url_key, premium),
-            )
+            await message.answer_photo(photo=info.thumbnail, caption=caption,
+                                       parse_mode="HTML", reply_markup=kb)
         else:
-            await status_msg.edit_text(
-                caption,
-                parse_mode="HTML",
-                reply_markup=quality_keyboard(url_key, premium),
-            )
+            await _safe_edit(status_msg, caption, parse_mode="HTML", reply_markup=kb)
     except Exception:
-        try:
-            await status_msg.edit_text(
-                caption,
-                parse_mode="HTML",
-                reply_markup=quality_keyboard(url_key, premium),
-            )
-        except Exception:
-            pass
+        await _safe_edit(status_msg, caption, parse_mode="HTML", reply_markup=kb)
 
 
 @router.callback_query(F.data.startswith("dl|"))
@@ -219,14 +148,9 @@ async def handle_download_callback(callback: CallbackQuery):
     user_id = callback.from_user.id
 
     if _active_downloads.get(user_id):
-        warn = await callback.message.answer(
-            f"╭─────────────────────\n"
-            f"│ ⏳ <b>Уже скачивается…</b>\n"
-            f"│ Подожди немного!\n"
-            f"╰─────────────────────",
-            parse_mode="HTML",
-        )
-        asyncio.create_task(_delete_after(warn, 4))
+        await callback.message.answer(
+            f'<tg-emoji emoji-id="5983150113483134607">⏰</tg-emoji> <b>Подожди</b> — твоё предыдущее видео ещё загружается.',
+            parse_mode="HTML")
         return
 
     parts = callback.data.split("|", 2)
@@ -234,31 +158,20 @@ async def handle_download_callback(callback: CallbackQuery):
         return
 
     _, quality_raw, url_key = parts
+    audio_only = quality_raw == "audio"
 
-    # Получаем полный URL из кэша
     url = _get_url(url_key)
     if not url:
         await callback.message.answer(
-            f"╭━━━━━━━━━━━━━━━━━━━━━╮\n"
-            f"┃   ✖️  <b>Ссылка устарела</b>   ┃\n"
-            f"╰━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-            f"<blockquote>Пришли ссылку заново.</blockquote>",
-            parse_mode="HTML",
-        )
+            f'<tg-emoji emoji-id="5870657884844462243">❌</tg-emoji> <b>Ссылка устарела.</b> Отправь видео заново.',
+            parse_mode="HTML")
         return
-
-    audio_only = quality_raw == "audio"
 
     premium = db.is_premium(user_id)
     if not premium and db.get_daily_count(user_id) >= FREE_DAILY_LIMIT:
         await callback.message.answer(
-            f"╭━━━━━━━━━━━━━━━━━━━━━╮\n"
-            f"┃    ⛔  <b>Лимит исчерпан</b>    ┃\n"
-            f"╰━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-            f"<blockquote>⭐ Оформи Premium!</blockquote>",
-            parse_mode="HTML",
-            reply_markup=premium_keyboard(),
-        )
+            f'<tg-emoji emoji-id="6037249452824072506">🔒</tg-emoji> <b>Лимит исчерпан</b>\n\nОформи Premium:',
+            parse_mode="HTML", reply_markup=premium_keyboard())
         return
 
     if not premium and not audio_only:
@@ -268,21 +181,12 @@ async def handle_download_callback(callback: CallbackQuery):
     else:
         quality = quality_raw
 
-    label = "🎵 MP3" if audio_only else f"📺 {quality}p"
-
+    label = "MP3 аудио" if audio_only else f"{quality}p видео"
     status_msg = await callback.message.answer(
-        f"╭━━━━━━━━━━━━━━━━━━━━━╮\n"
-        f"┃   🔥  <b>Скачиваю {label}</b>\n"
-        f"╰━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-        f"<blockquote>⏳ Пожалуйста, подожди.\n"
-        f"Это займёт немного времени…</blockquote>",
+        f'<tg-emoji emoji-id="5345906554510012647">🔄</tg-emoji> <b>Скачиваю {label}…</b>\n'
+        f'<blockquote>Это может занять немного времени</blockquote>',
         parse_mode="HTML",
         message_effect_id=FX_FIRE,
-    )
-
-    stop_event = asyncio.Event()
-    anim_task = asyncio.create_task(
-        _animate_status(status_msg, f"Скачиваю {label}…", stop_event)
     )
 
     _active_downloads[user_id] = True
@@ -295,31 +199,20 @@ async def handle_download_callback(callback: CallbackQuery):
             user_id=user_id,
         )
         file_path = result.file_path
+
         size_mb = os.path.getsize(file_path) / (1024 * 1024)
-
-        stop_event.set()
-        anim_task.cancel()
-        await asyncio.sleep(0.1)
-
         if size_mb > MAX_FILE_SIZE_MB:
-            await status_msg.edit_text(
-                f"╭━━━━━━━━━━━━━━━━━━━━━╮\n"
-                f"┃  ⚠️  <b>Файл слишком большой</b> ┃\n"
-                f"╰━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-                f"<blockquote>📦 Размер: <code>{size_mb:.1f} МБ</code>\n"
-                f"🚫 Лимит Telegram: <code>{MAX_FILE_SIZE_MB} МБ</code></blockquote>\n\n"
-                f"🔙 Попробуй выбрать качество ниже.",
-                parse_mode="HTML",
-            )
-            asyncio.create_task(_delete_after(status_msg, 8))
+            await _safe_edit(status_msg,
+                f'<tg-emoji emoji-id="5870657884844462243">❌</tg-emoji> <b>Файл слишком большой</b>\n\n'
+                f'<blockquote>Размер: <code>{size_mb:.1f} МБ</code>\n'
+                f'Лимит Telegram: <code>{MAX_FILE_SIZE_MB} МБ</code></blockquote>\n\n'
+                f'Попробуй выбрать качество ниже.',
+                parse_mode="HTML")
             return
 
-        await status_msg.edit_text(
-            f"╭─────────────────────\n"
-            f"│ 📤 <b>Отправляю файл…</b>\n"
-            f"╰─────────────────────",
-            parse_mode="HTML",
-        )
+        await _safe_edit(status_msg,
+            f'<tg-emoji emoji-id="5963103826075456248">⬆</tg-emoji> <b>Отправляю файл…</b>',
+            parse_mode="HTML")
 
         input_file = FSInputFile(file_path, filename=os.path.basename(file_path))
 
@@ -328,11 +221,9 @@ async def handle_download_callback(callback: CallbackQuery):
                 audio=input_file,
                 title=result.title,
                 caption=(
-                    f"╭━━━━━━━━━━━━━━━━━━━━━╮\n"
-                    f"┃   🎵  <b>Аудио готово!</b>    ┃\n"
-                    f"╰━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-                    f"🎵 <b>{result.title}</b>\n"
-                    f"<code>MP3 • 192 kbps</code>"
+                    f'<tg-emoji emoji-id="5870528606328852614">📁</tg-emoji> '
+                    f'<b>{result.title}</b>\n\n'
+                    f'<tg-emoji emoji-id="6028435952299413210">ℹ</tg-emoji> Формат: <code>MP3 · 192kbps</code>'
                 ),
                 parse_mode="HTML",
                 message_effect_id=FX_LIKE,
@@ -341,11 +232,9 @@ async def handle_download_callback(callback: CallbackQuery):
             await callback.message.answer_video(
                 video=input_file,
                 caption=(
-                    f"╭━━━━━━━━━━━━━━━━━━━━━╮\n"
-                    f"┃   🎬  <b>Видео готово!</b>    ┃\n"
-                    f"╰━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-                    f"🎬 <b>{result.title}</b>\n"
-                    f"<code>{quality}p • MP4</code>"
+                    f'<tg-emoji emoji-id="6035128606563241721">🖼</tg-emoji> '
+                    f'<b>{result.title}</b>\n\n'
+                    f'<tg-emoji emoji-id="6028435952299413210">ℹ</tg-emoji> Качество: <code>{quality}p</code>'
                 ),
                 parse_mode="HTML",
                 supports_streaming=True,
@@ -353,51 +242,26 @@ async def handle_download_callback(callback: CallbackQuery):
             )
 
         db.increment_daily_count(user_id)
-        remaining = "∞" if premium else str(
-            max(0, FREE_DAILY_LIMIT - db.get_daily_count(user_id))
-        )
-
-        await status_msg.edit_text(
-            f"╭━━━━━━━━━━━━━━━━━━━━━╮\n"
-            f"┃    ✔️  <b>Готово!</b>          ┃\n"
-            f"╰━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-            f"├ 📥 Загрузок осталось: <b>{remaining}</b>\n"
-            f"╰ 💬 Хочешь ещё? Просто пришли ссылку!",
-            parse_mode="HTML",
-        )
-        asyncio.create_task(_delete_after(status_msg, 6))
+        remaining = "∞" if premium else str(max(0, FREE_DAILY_LIMIT - db.get_daily_count(user_id)))
+        await _safe_edit(status_msg,
+            f'<tg-emoji emoji-id="5870633910337015697">✅</tg-emoji> <b>Готово!</b>\n\n'
+            f'<tg-emoji emoji-id="6039802767931871481">⬇</tg-emoji> Загрузок сегодня осталось: <b>{remaining}</b>',
+            parse_mode="HTML")
 
     except asyncio.TimeoutError:
-        stop_event.set()
-        anim_task.cancel()
-        await asyncio.sleep(0.1)
-        await status_msg.edit_text(
-            f"╭━━━━━━━━━━━━━━━━━━━━━╮\n"
-            f"┃     ✖️  <b>Таймаут</b>       ┃\n"
-            f"╰━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-            f"<blockquote>Превышено время ожидания.\n"
-            f"Попробуй ещё раз позже.</blockquote>",
-            parse_mode="HTML",
-            message_effect_id=FX_POOP,
-        )
-        asyncio.create_task(_delete_after(status_msg, 8))
+        await _safe_edit(status_msg,
+            f'<tg-emoji emoji-id="5870657884844462243">❌</tg-emoji> <b>Таймаут</b>\n\n'
+            f'Превышено время ожидания. Попробуй позже.',
+            parse_mode="HTML")
     except Exception as e:
-        stop_event.set()
-        anim_task.cancel()
-        await asyncio.sleep(0.1)
         logger.error(f"Download error for user {user_id}: {e}")
-        await status_msg.edit_text(
-            f"╭━━━━━━━━━━━━━━━━━━━━━╮\n"
-            f"┃   ✖️  <b>Ошибка скачивания</b>  ┃\n"
-            f"╰━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-            f"<blockquote>▪️ Видео недоступно или приватное\n"
-            f"▪️ Временные проблемы с платформой\n"
-            f"▪️ Попробуй другое качество</blockquote>\n\n"
-            f"🔙 Попробуй ещё раз позже.",
-            parse_mode="HTML",
-            message_effect_id=FX_POOP,
-        )
-        asyncio.create_task(_delete_after(status_msg, 8))
+        await _safe_edit(status_msg,
+            f'<tg-emoji emoji-id="5870657884844462243">❌</tg-emoji> <b>Ошибка скачивания</b>\n\n'
+            f'<blockquote>'
+            f'<tg-emoji emoji-id="5870528606328852614">📁</tg-emoji> Видео недоступно или приватное\n'
+            f'<tg-emoji emoji-id="5870528606328852614">📁</tg-emoji> Временные проблемы с платформой'
+            f'</blockquote>\n\nПопробуй позже.',
+            parse_mode="HTML")
     finally:
         _active_downloads.pop(user_id, None)
         if file_path:
@@ -408,12 +272,9 @@ async def handle_download_callback(callback: CallbackQuery):
 async def handle_premium_prompt(callback: CallbackQuery):
     await callback.answer("⭐ Это Premium-функция", show_alert=False)
     await callback.message.answer(
-        f"╭━━━━━━━━━━━━━━━━━━━━━╮\n"
-        f"┃   🔒  <b>Только Premium</b>   ┃\n"
-        f"╰━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-        f"Качество <code>1080p</code> доступно\n"
-        f"только Premium-пользователям.\n\n"
-        f"<blockquote>⭐ Всего $3/мес — без лимитов!</blockquote>",
+        f'<tg-emoji emoji-id="6037249452824072506">🔒</tg-emoji> <b>Только для Premium</b>\n\n'
+        f'Качество <code>1080p</code> доступно только Premium-пользователям.\n\n'
+        f'<blockquote><tg-emoji emoji-id="6032644646587338669">🎁</tg-emoji> Оформи подписку ниже</blockquote>',
         parse_mode="HTML",
         message_effect_id=FX_HEART,
         reply_markup=premium_keyboard(),
@@ -424,24 +285,10 @@ async def handle_premium_prompt(callback: CallbackQuery):
 async def handle_donate(callback: CallbackQuery):
     await callback.answer()
     await callback.message.answer(
-        f"╭━━━━━━━━━━━━━━━━━━━━━╮\n"
-        f"┃     💝  <b>Донат</b>          ┃\n"
-        f"╰━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-        f"Спасибо за желание поддержать!\n\n"
-        f"<blockquote>👉 https://your-donate-link.com</blockquote>",
+        f'<tg-emoji emoji-id="5904462880941545555">🪙</tg-emoji> <b>Поддержать проект</b>\n\n'
+        f'Спасибо за желание поддержать нас!\n\n'
+        f'<blockquote>👉 https://your-donate-link.com</blockquote>',
         parse_mode="HTML",
         message_effect_id=FX_HEART,
     )
-
-
-@router.callback_query(F.data == "cancel")
-async def handle_cancel(callback: CallbackQuery):
-    await callback.answer("Отменено")
-    await callback.message.delete()
-
-
-@router.callback_query(F.data == "back")
-async def handle_back(callback: CallbackQuery):
-    await callback.answer()
-    await callback.message.delete()
 
