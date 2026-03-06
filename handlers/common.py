@@ -1,4 +1,4 @@
-from aiogram import Router
+from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message
 
@@ -14,7 +14,8 @@ FX_FIRE  = "5104841245755180586"
 FX_HEART = "5159385139981059251"
 FX_POOP  = "5046589136895476101"
 
-BANNER_FILE_ID = "AgACAgIAAxkBAAIBYmmqiZqVrpa7WYhpUEChnwQwaitYAAL6EWsbBJtYSUOeutFe6LoaAQADAgADeQADOgQ"
+# Сюда вставь новый file_id после того как получишь его отправив фото боту
+BANNER_FILE_ID = None
 
 
 @router.message(CommandStart())
@@ -50,13 +51,34 @@ async def cmd_start(message: Message):
             f'🔗 Просто отправь ссылку на видео!'
         )
 
-    await message.answer_photo(
-        photo=BANNER_FILE_ID,
-        caption=text,
+    if BANNER_FILE_ID:
+        await message.answer_photo(
+            photo=BANNER_FILE_ID,
+            caption=text,
+            parse_mode="HTML",
+            message_effect_id=FX_PARTY,
+            reply_markup=main_menu_keyboard(premium),
+        )
+    else:
+        await message.answer(
+            text,
+            parse_mode="HTML",
+            message_effect_id=FX_PARTY,
+            reply_markup=main_menu_keyboard(premium),
+        )
+
+
+# ─── ВРЕМЕННЫЙ хендлер — отправь боту фото и получи file_id ─────────────────
+# После получения file_id: вставь его в BANNER_FILE_ID выше и удали этот хендлер
+@router.message(F.photo)
+async def get_photo_id(message: Message):
+    file_id = message.photo[-1].file_id
+    await message.answer(
+        f"✅ Твой новый BANNER_FILE_ID:\n\n<code>{file_id}</code>\n\n"
+        f"Вставь это в common.py в переменную BANNER_FILE_ID",
         parse_mode="HTML",
-        message_effect_id=FX_PARTY,
-        reply_markup=main_menu_keyboard(premium),
     )
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 @router.message(Command("help"))
@@ -157,6 +179,3 @@ async def cmd_profile(message: Message):
         )
 
     await message.answer(text, parse_mode="HTML")
-@router.message(F.photo)
-async def get_photo_id(message: Message):
-    await message.answer(message.photo[-1].file_id)
