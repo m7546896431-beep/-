@@ -1,58 +1,88 @@
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+"""
+Оплата Premium через Telegram Stars.
+100 ⭐ = 30 дней Premium
+"""
+import logging
+import datetime
+from aiogram import Router, F
+from aiogram.types import (
+    Message, CallbackQuery,
+    LabeledPrice, PreCheckoutQuery,
+    SuccessfulPayment,
+)
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import InlineKeyboardButton
+
+import database as db
+
+router = Router()
+logger = logging.getLogger(__name__)
+
+PREMIUM_STARS  = 100
+PREMIUM_DAYS   = 30
+
+FX_PARTY = "5046509860389126442"
+FX_HEART = "5159385139981059251"
+FX_FIRE  = "5104841245755180586"
 
 
-def main_menu_keyboard(is_premium: bool) -> ReplyKeyboardMarkup:
-    """Нижнее меню бота"""
-    builder = ReplyKeyboardBuilder()
-    builder.row(
-        KeyboardButton(text="🔗 Отправить ссылку"),
-        KeyboardButton(text="👤 Профиль"),
-    )
-    if is_premium:
-        builder.row(
-            KeyboardButton(text="⭐ Premium активен"),
-            KeyboardButton(text="ℹ️ Помощь"),
-        )
-    else:
-        builder.row(
-            KeyboardButton(text="⭐ Купить Premium"),
-            KeyboardButton(text="ℹ️ Помощь"),
-        )
-    builder.adjust(2)
-    return builder.as_markup(resize_keyboard=True)
-
-
-def quality_keyboard(url_key: str, is_premium: bool) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="📺 360p",  callback_data=f"dl|360|{url_key}"),
-        InlineKeyboardButton(text="📺 720p",  callback_data=f"dl|720|{url_key}"),
-    )
-    if is_premium:
-        builder.row(
-            InlineKeyboardButton(text="🎬 1080p ⭐", callback_data=f"dl|1080|{url_key}"),
-        )
-    else:
-        builder.row(
-            InlineKeyboardButton(text="🔒 1080p — только Premium", callback_data="premium_prompt"),
-        )
-    builder.row(
-        InlineKeyboardButton(text="🎵 Скачать MP3", callback_data=f"dl|audio|{url_key}"),
-    )
-    return builder.as_markup()
-
-
-def premium_keyboard() -> InlineKeyboardMarkup:
+def buy_keyboard():
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
-            text="⭐ Купить Premium — $3/мес",
-            url="https://t.me/your_payment_bot",
+            text=f"⭐ Купить Premium — {PREMIUM_STARS} звёзд",
+            callback_data="buy_stars",
         )
     )
-    builder.row(
-        InlineKeyboardButton(text="💝 Поддержать донатом", callback_data="donate"),
-    )
     return builder.as_markup()
+
+
+@router.callback_query(F.data == "buy_stars")
+async def send_invoice(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer_invoice(
+        title="⭐ Premium подписка",
+        description=(
+            f"✔️ {PREMIUM_DAYS} дней Premium\n"
+            f"✔️ Без лимитов загрузок\n"
+            f"✔️ Качество до 1080p\n"
+            f"✔️ Приоритетная очередь"
+        ),
+        payload="premium_30d",
+        currency="XTR",           # Telegram Stars
+        prices=[LabeledPrice(label="Premium 30 дней", amount=PREMIUM_STARS)],
+        protect_content=False,
+    )
+
+
+@router.pre_checkout_query()
+async def pre_checkout(query: PreCheckoutQuery):
+    """Telegram требует подтвердить платёж в течение 10 секунд."""
+    await query.answer(ok=True)
+
+
+@router.message(F.successful_payment)
+async def successful_payment(message: Message):
+    payment: SuccessfulPayment = message.successful_payment
+    user_id = message.from_user.id
+
+    if payment.invoice_payload == "premium_30d":
+        until = str(datetime.date.today() + datetime.timedelta(days=PREMIUM_DAYS))
+        db.get_or_create_user(user_id)
+        db.set_premium(user_id, until)
+
+        logger.info(f"Premium bought: user={user_id} until={until} stars={payment.total_amount}")
+
+        await message.answer(
+            f'<tg-emoji emoji-id="6041731551845159060">🎉</tg-emoji> <b>Premium активирован!</b>\n\n'
+            f'<blockquote>'
+            f'<tg-emoji emoji-id="5870633910337015697">✅</tg-emoji> Без лимитов загрузок\n'
+            f'<tg-emoji emoji-id="5870633910337015697">✅</tg-emoji> Качество до <code>1080p</code>\n'
+            f'<tg-emoji emoji-id="5870633910337015697">✅</tg-emoji> Приоритет в очереди\n'
+            f'<tg-emoji emoji-id="5890937706803894250">📅</tg-emoji> Действует до: <code>{until}</code>'
+            f'</blockquote>\n\n'
+            f'Спасибо за поддержку! 🔥',
+            parse_mode="HTML",
+            message_effect_id=FX_PARTY,
+        )
 
