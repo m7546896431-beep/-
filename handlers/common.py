@@ -14,6 +14,8 @@ FX_FIRE  = "5104841245755180586"
 FX_HEART = "5159385139981059251"
 FX_POOP  = "5046589136895476101"
 
+BANNER_FILE_ID = "AgACAgUAAxkBAAFD_MNpqodbqdGyJUw0AiF9u9w29gEPBwACuQ1rG9reWFV-FZ6aOiE6HgEAAwIAA20AAzoE"
+
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
@@ -24,8 +26,9 @@ async def cmd_start(message: Message):
 
     if premium:
         text = (
-            f'<tg-emoji emoji-id="6041731551845159060">🎉</tg-emoji> <b>Привет, {user.first_name}!</b>\n\n'
-            f'<tg-emoji emoji-id="6032644646587338669">🎁</tg-emoji> У тебя активен <b>Premium</b> — все функции открыты!\n\n'
+            f'<tg-emoji emoji-id="6041731551845159060">🎉</tg-emoji> Вас приветствует <b>SnapLoad</b>!\n\n'
+            f'<tg-emoji emoji-id="6032644646587338669">🎁</tg-emoji> Привет, <b>{user.first_name}</b>! '
+            f'У тебя активен <b>Premium</b> — все функции открыты!\n\n'
             f'<blockquote>'
             f'<tg-emoji emoji-id="5870528606328852614">📁</tg-emoji> YouTube · TikTok · Instagram\n'
             f'<tg-emoji emoji-id="6039802767931871481">⬇</tg-emoji> Качество до <b>1080p</b>\n'
@@ -36,9 +39,9 @@ async def cmd_start(message: Message):
         )
     else:
         text = (
-            f'👋 <b>Привет, {user.first_name}!</b>\n\n'
-            f'Я скачиваю видео из популярных платформ\n'
-            f'и отправляю файл прямо в чат.\n\n'
+            f'👋 Вас приветствует <b>SnapLoad</b>!\n\n'
+            f'Привет, <b>{user.first_name}</b>! Я скачиваю видео\n'
+            f'из популярных платформ прямо в чат.\n\n'
             f'<blockquote>'
             f'📁 YouTube · TikTok · Instagram\n'
             f'⬇️ Качество до 720p\n'
@@ -47,8 +50,9 @@ async def cmd_start(message: Message):
             f'🔗 Просто отправь ссылку на видео!'
         )
 
-    await message.answer(
-        text,
+    await message.answer_photo(
+        photo=BANNER_FILE_ID,
+        caption=text,
         parse_mode="HTML",
         message_effect_id=FX_PARTY,
         reply_markup=main_menu_keyboard(premium),
