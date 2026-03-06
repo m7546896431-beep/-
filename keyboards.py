@@ -85,4 +85,3 @@ async def successful_payment(message: Message):
             parse_mode="HTML",
             message_effect_id=FX_PARTY,
         )
-
