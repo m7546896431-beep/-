@@ -1,4 +1,4 @@
-from aiogram import Router, F
+from aiogram import Router
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message
 
@@ -14,8 +14,7 @@ FX_FIRE  = "5104841245755180586"
 FX_HEART = "5159385139981059251"
 FX_POOP  = "5046589136895476101"
 
-# Сюда вставь новый file_id после того как получишь его отправив фото боту
-BANNER_FILE_ID = "AgACAgIAAxkBAAMUaaqmIkNDlfV-ScThZFyAeIZnQGEAAs8XaxtiTlhJoaafrIiiAWoBAAMCAAN5AAM6BA"
+BANNER_FILE_ID = "AgACAgIAAxkBAAMDaasDjR59xqXYuZYbxlXUntomBn8AAhAUaxufylhJsex4Njc5jZcBAAMCAAN5AAM6BA"
 
 
 @router.message(CommandStart())
@@ -51,26 +50,13 @@ async def cmd_start(message: Message):
             f'🔗 Просто отправь ссылку на видео!'
         )
 
-    if BANNER_FILE_ID:
-        try:
-            await message.answer_photo(
-                photo=BANNER_FILE_ID,
-                caption=text,
-                parse_mode="HTML",
-                message_effect_id=FX_PARTY,
-                reply_markup=main_menu_keyboard(premium),
-            )
-            return
-        except Exception:
-            pass
-    await message.answer(
-        text,
+    await message.answer_photo(
+        photo=BANNER_FILE_ID,
+        caption=text,
         parse_mode="HTML",
         message_effect_id=FX_PARTY,
         reply_markup=main_menu_keyboard(premium),
     )
-
-
 
 
 @router.message(Command("help"))
@@ -171,25 +157,4 @@ async def cmd_profile(message: Message):
         )
 
     await message.answer(text, parse_mode="HTML")
-
-
-# ─── Обработчики кнопок главного меню ────────────────────────────────────────
-@router.message(F.text == "⬇️ Скачать видео")
-async def btn_download(message: Message):
-    await message.answer(
-        "🔗 Отправь мне ссылку на видео с YouTube, TikTok или Instagram!",
-        parse_mode="HTML",
-    )
-
-@router.message(F.text == "👤 Мой профиль")
-async def btn_profile(message: Message):
-    await cmd_profile(message)
-
-@router.message(F.text == "⭐ Premium")
-async def btn_premium(message: Message):
-    await cmd_premium(message)
-
-@router.message(F.text == "❓ Помощь")
-async def btn_help(message: Message):
-    await cmd_help(message)
 
