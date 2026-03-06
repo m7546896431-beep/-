@@ -52,20 +52,23 @@ async def cmd_start(message: Message):
         )
 
     if BANNER_FILE_ID:
-        await message.answer_photo(
-            photo=BANNER_FILE_ID,
-            caption=text,
-            parse_mode="HTML",
-            message_effect_id=FX_PARTY,
-            reply_markup=main_menu_keyboard(premium),
-        )
-    else:
-        await message.answer(
-            text,
-            parse_mode="HTML",
-            message_effect_id=FX_PARTY,
-            reply_markup=main_menu_keyboard(premium),
-        )
+        try:
+            await message.answer_photo(
+                photo=BANNER_FILE_ID,
+                caption=text,
+                parse_mode="HTML",
+                message_effect_id=FX_PARTY,
+                reply_markup=main_menu_keyboard(premium),
+            )
+            return
+        except Exception:
+            pass
+    await message.answer(
+        text,
+        parse_mode="HTML",
+        message_effect_id=FX_PARTY,
+        reply_markup=main_menu_keyboard(premium),
+    )
 
 
 
