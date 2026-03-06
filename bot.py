@@ -5,7 +5,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import BOT_TOKEN
-from handlers import common, downloader
+from handlers import common, downloader, admin
 from middlewares.throttle import ThrottleMiddleware
 
 logging.basicConfig(
@@ -24,6 +24,7 @@ async def main():
 
     dp.include_router(common.router)
     dp.include_router(downloader.router)
+    dp.include_router(admin.router)
 
     logger.info("✔️  Bot started")
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
@@ -31,3 +32,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
